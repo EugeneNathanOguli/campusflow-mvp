@@ -145,7 +145,8 @@ for workflow_step in ("signup_complete", "expenses_complete", "plan_complete", "
 
 profile = st.session_state.profile
 admin_passcode = st.secrets.get("admin_passcode", "")
-admin_access_enabled = auth_configured and bool(admin_passcode)
+admin_access_enabled = bool(admin_passcode)
+
 
 def money(value: float) -> str:
     return f"UGX {value:,.0f}"
@@ -233,6 +234,14 @@ plan = calculate_plan(
     profile["fixed_weekly"],
     profile["payout_frequency"],
 )
+
+if "review_queue" not in st.session_state:
+    st.session_state.review_queue = [
+        {"Student": profile["name"] or "New student", "Network": profile["network"], "Phone": profile["phone"] or "Not provided", "Amount": money(plan["payout_amount"]), "Status": "Ready", "Reason": "No issues detected."},
+        {"Student": "Joel M.", "Network": "Airtel", "Phone": "0701 883 214", "Amount": "UGX 175,000", "Status": "Ready", "Reason": "No issues detected."},
+        {"Student": "Nabirye S.", "Network": "MTN", "Phone": "0774 102 665", "Amount": "UGX 210,000", "Status": "Needs review", "Reason": "Manual check required: phone number and payout amount need confirmation before release."},
+        {"Student": "David O.", "Network": "Airtel", "Phone": "0755 430 118", "Amount": "UGX 160,000", "Status": "Ready", "Reason": "No issues detected."},
+    ]
 
 with st.sidebar:
     st.markdown("# campusflow")
@@ -478,12 +487,26 @@ elif page == "Admin desk" and admin_access_enabled and st.session_state.admin_au
     k3.metric("Ledger match", "99.8%", "Reconciled today", border=True)
 
     st.subheader("Monday payout queue", divider="gray")
-    rows = [
-        {"Student": profile["name"] or "New student", "Network": profile["network"], "Phone": profile["phone"] or "Not provided", "Amount": money(plan["payout_amount"]), "Status": "Ready"},
-        {"Student": "Joel M.", "Network": "Airtel", "Phone": "0701 883 214", "Amount": "UGX 175,000", "Status": "Ready"},
-        {"Student": "Nabirye S.", "Network": "MTN", "Phone": "0774 102 665", "Amount": "UGX 210,000", "Status": "Needs review"},
-        {"Student": "David O.", "Network": "Airtel", "Phone": "0755 430 118", "Amount": "UGX 160,000", "Status": "Ready"},
-    ]
+    rows = st.session_state.review_queue
+    for index, row in enumerate(rows):
+        if row["Status"] == "Needs review":
+            with st.container(border=True):
+                st.write(f"**{row['Student']}**")
+                st.caption(f"{row['Network']} · {row['Phone']} · {row['Amount']}")
+                st.warning(f"Review reason: {row['Reason']}", icon=":material/report_problem:")
+                review_col_1, review_col_2 = st.columns(2)
+                if review_col_1.button("Approve payout", key=f"approve_{index}", type="primary"):
+                    row["Status"] = "Approved"
+                    row["Reason"] = "Approved after manual review."
+                    st.toast(f"{row['Student']} approved for payout", icon=":material/check_circle:")
+                    st.rerun()
+                if review_col_2.button("Reject payout", key=f"reject_{index}"):
+                    row["Status"] = "Rejected"
+                    row["Reason"] = "Rejected after manual review."
+                    st.toast(f"{row['Student']} rejected from payout", icon=":material/close:")
+                    st.rerun()
+                st.markdown("---")
+
     st.dataframe(rows, width="stretch", hide_index=True, column_config={"Status": st.column_config.TextColumn("Status")})
     st.caption(f"Next scheduled release: {payout_schedule_label(profile)}")
     if not st.session_state.approved:
