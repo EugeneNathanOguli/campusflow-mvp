@@ -4,12 +4,36 @@ A Streamlit prototype for automated student allowance pacing and a financial loc
 
 ## Run locally
 
+From PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+streamlit run app.py
+```
+
+From Git Bash:
+
 ```bash
 source .venv/Scripts/activate
 streamlit run app.py
 ```
 
 Open http://localhost:8501.
+
+## Project structure
+
+- `app.py` is the Streamlit entry point.
+- `frontend/ui.py` sets up authentication, session state, and workspace navigation.
+- `frontend/pages.py` renders the welcome, student workflow, overview, and admin screens.
+- `backend/domain.py` contains profile defaults and allowance-planning helpers.
+- `backend/storage.py` handles authenticated SQLite and Supabase workspace persistence.
+- `tests/` contains standard-library unit tests for the backend logic and storage.
+
+Run tests with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
 ## Publish with Streamlit Community Cloud
 
@@ -56,6 +80,12 @@ Authentication alone is not enough for real financial data. A production release
 - A formal privacy policy, retention rules, and appropriate regulatory review.
 
 This prototype uses simulated balances and payout approvals. It does not connect to Mobile Money, XENO, a bank, or a production database.
+
+## Simulated allowance and transaction flow
+
+The calculator compares available funds with the selected expense baseline and target duration. Recording a deposit starts a simulated vault balance and adds a deposit transaction. When an authenticated workspace is opened, CampusFlow records any scheduled payouts that have become due since the last visit, deducting them from that balance. Payout processing does not run in the background while the app is closed.
+
+Students can request an emergency withdrawal up to the available simulated balance, select a reason, and see the resulting transaction in the workspace history. These events are prototypes only: no money is moved and no SMS is sent. Unauthenticated demo workspace state is session-only; authenticated workspace data is stored using the configured backend.
 
 Authenticated MVP workspaces are stored in a local SQLite file named `campusflow.db`, keyed by the identity-provider user ID. That file is ignored by Git. Unauthenticated demo sessions do not read or write the database, preventing different visitors from sharing one profile. Local authenticated development can restore a user's profile and progress after they sign in again, but Streamlit Community Cloud storage is not a durable production database. Before handling real financial data, replace SQLite with a hosted database such as PostgreSQL or Supabase and add server-side authorization for every query.
 
