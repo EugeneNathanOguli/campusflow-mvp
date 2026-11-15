@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
+from uuid import uuid4
 
 import streamlit as st
 
+from backend.mtn_momo import MomoApiError, MomoClient
 from backend.domain import (
     WORKFLOW_STATE_KEYS,
     calculate_plan,
@@ -99,7 +102,7 @@ def render_expenses_page(
     st.write("Tell us what it costs to get through a normal week, including expenses that do not happen every day.")
     with st.form("student_expenses"):
         daily_food = st.number_input("Daily food budget (UGX)", min_value=0, value=profile["daily_food"], step=1000)
-        daily_other = st.number_input("Daily transport, airtime and printing (UGX)", min_value=0, value=profile["daily_other"], step=1000)
+        daily_other = st.number_input("Daily other essential costs (UGX)", min_value=0, value=profile["daily_other"], step=1000)
         fixed_weekly = st.number_input("Fixed weekly expenses (UGX)", min_value=0, value=profile["fixed_weekly"], step=5000, help="For rent, subscriptions, or other costs you pay once a week or less often.")
         submitted = st.form_submit_button("Save expense baseline", type="primary", icon=":material/save:")
     if submitted:
@@ -218,7 +221,15 @@ def render_schedule_page(
     st.info(f"Your payout will be scheduled **{payout_schedule_label(profile)}**.", icon=":material/calendar_month:")
 
 
-def render_deposit_page(profile: dict, auth_configured: bool, supabase_url: str, supabase_service_key: str, database_path, user_key: str, money, plan: dict) -> None:
+def _show_mtn_flash() -> None:
+    flash = st.session_state.pop("mtn_flash", None)
+    if flash:
+        level, message = flash
+        getattr(st, level)(message)
+
+
+def render_deposit_page(profile: dict, auth_configured: bool, supabase_url: str, supabase_service_key: str, database_path, user_key: str, money, plan: dict, mtn_settings: dict) -> None:
+    _show_mtn_flash()
     st.title("Deposit your allowance", icon=":material/account_balance:")
     st.write("Review your plan, then add a simulated deposit to your CampusFlow vault.")
     if profile["locked"]:
@@ -231,13 +242,67 @@ def render_deposit_page(profile: dict, auth_configured: bool, supabase_url: str,
         st.metric("Current simulated balance", money(profile["vault_balance"]))
         st.write(f"**{profile['duration_weeks']} weeks** · {payout_schedule_label(profile)} · {profile['network']} {profile['phone']}")
         st.caption(f"{profile['payout_frequency']} payout: {money(plan['payout_amount'])} · Daily baseline: {money(plan['daily_baseline'])}")
-    confirm_deposit = st.checkbox("I confirm that these details and the deposit amount are correct.")
+        mtn_client = MomoClient(mtn_settings)
+        if mtn_client.is_configured("collection"):
+            st.subheader("Pay with MTN MoMo sandbox")
+            st.caption("This requests a sandbox payment from the registered MTN number. It does not use a live MTN endpoint.")
+            if profile["network"] != "MTN":
+                st.info("Select MTN as your mobile money network to use sandbox collection.")
+            elif profile["locked"]:
+                st.info("This allowance deposit has already been completed.")
+            elif profile["mtn_pending_collection"]:
+                _render_mtn_status_action(
+                    profile,
+                    "collection",
+                    auth_configured,
+                    supabase_url,
+                    supabase_service_key,
+                    database_path,
+                    user_key,
+                    mtn_settings,
+                    money,
+                )
+            elif profile["total_funds"] > 0:
+                confirm_mtn_deposit = st.checkbox(
+                    "I confirm that MTN sandbox should request this deposit amount."
+                )
+                if st.button(
+                    "Request MTN MoMo sandbox payment",
+                    type="primary",
+                    disabled=not confirm_mtn_deposit,
+                ):
+                    reference_id = str(uuid4())
+                    profile["mtn_pending_collection"] = {
+                        "reference_id": reference_id,
+                        "amount": round(profile["total_funds"]),
+                        "status": "PENDING",
+                    }
+                    _save_mtn_profile(
+                        profile,
+                        auth_configured,
+                        supabase_url,
+                        supabase_service_key,
+                        database_path,
+                        user_key,
+                    )
+                    try:
+                        mtn_client.request_to_pay(
+                            reference_id, round(profile["total_funds"]), profile["phone"]
+                        )
+                    except MomoApiError as error:
+                        st.error(str(error), icon=":material/error:")
+                    else:
+                        st.info("Payment request submitted. Check its status below.")
+                        st.rerun()
+        else:
+            st.caption("Configure MTN collection sandbox credentials in Streamlit secrets to enable MTN payments.")
+        confirm_deposit = st.checkbox("I confirm that these details and the deposit amount are correct.")
     if profile["locked"]:
         st.success("Your simulated deposit has already been recorded.", icon=":material/lock:")
     else:
         if profile["total_funds"] <= 0:
             st.info("Save a plan with a positive allowance amount before recording a simulated deposit.")
-    if not profile["locked"] and st.button("Record simulated deposit", type="primary", icon=":material/lock:", disabled=not confirm_deposit or profile["total_funds"] <= 0):
+    if not profile["locked"] and st.button("Record simulated deposit", type="primary", icon=":material/lock:", disabled=not confirm_deposit or profile["total_funds"] <= 0 or bool(profile["mtn_pending_collection"])):
         profile["locked"] = True
         profile["vault_balance"] = round(profile["total_funds"])
         profile["initial_deposit"] = profile["vault_balance"]
@@ -304,6 +369,9 @@ def render_emergency_withdrawal_page(
     st.metric("Available simulated balance", money(balance))
     if not profile["locked"] or balance <= 0:
         st.info("A simulated deposit with a positive balance is required before requesting a withdrawal.")
+        return
+    if profile["mtn_pending_transfer"]:
+        st.info("An MTN MoMo payout is pending. Check its status before withdrawing.")
         return
 
     with st.form("emergency_withdrawal"):
@@ -449,7 +517,7 @@ def render_overview_page(profile: dict, plan: dict, money) -> None:
         with st.container(border=True):
             st.subheader("Expense baseline", icon=":material/tune:")
             st.metric("Food", money(profile["daily_food"]))
-            st.metric("Transport + airtime", money(profile["daily_other"]))
+            st.metric("Other essentials", money(profile["daily_other"]))
             st.caption("This is your recommended daily ceiling between drops.")
 
         with st.container(border=True):
@@ -457,7 +525,229 @@ def render_overview_page(profile: dict, plan: dict, money) -> None:
             st.caption("Deposits and payouts are simulated. No money is moved and no SMS is sent.")
 
 
-def render_page(page: str, profile: dict, auth_configured: bool, supabase_url: str, supabase_service_key: str, database_path, user_key: str, money, plan: dict) -> None:
+def _save_mtn_profile(
+    profile: dict,
+    auth_configured: bool,
+    supabase_url: str,
+    supabase_service_key: str,
+    database_path,
+    user_key: str,
+) -> None:
+    save_workspace(
+        user_key,
+        profile,
+        {step: st.session_state.get(step, False) for step in WORKFLOW_STATE_KEYS},
+        auth_configured,
+        supabase_url,
+        supabase_service_key,
+        database_path,
+    )
+
+
+def _render_mtn_status_action(
+    profile: dict,
+    transaction_kind: str,
+    auth_configured: bool,
+    supabase_url: str,
+    supabase_service_key: str,
+    database_path,
+    user_key: str,
+    mtn_settings: dict,
+    money,
+) -> None:
+    is_collection = transaction_kind == "collection"
+    pending_key = "mtn_pending_collection" if is_collection else "mtn_pending_transfer"
+    pending = profile[pending_key]
+    client = MomoClient(mtn_settings)
+    st.info(
+        f"{'Collection' if is_collection else 'Payout'} {pending['reference_id']} · "
+        f"{money(pending['amount'])} · {pending['status']}"
+    )
+    if st.button(
+        f"Check MTN {'collection' if is_collection else 'payout'} status",
+        key=f"check_mtn_{transaction_kind}",
+    ):
+        try:
+            result = (
+                client.collection_status(pending["reference_id"])
+                if is_collection
+                else client.transfer_status(pending["reference_id"])
+            )
+        except MomoApiError as error:
+            st.error(str(error), icon=":material/error:")
+            return
+        status = str(result.get("status", "UNKNOWN")).upper()
+        if status == "SUCCESSFUL":
+            try:
+                reported_amount = Decimal(str(result.get("amount", "")))
+            except InvalidOperation:
+                reported_amount = Decimal("-1")
+            if reported_amount != Decimal(round(pending["amount"])) or result.get(
+                "currency"
+            ) != "UGX":
+                st.error(
+                    "MTN MoMo status did not match the requested UGX amount. "
+                    "The balance was not changed; verify this transaction in the MTN portal.",
+                    icon=":material/error:",
+                )
+                return
+            if not is_collection and pending["amount"] > profile["vault_balance"]:
+                st.error(
+                    "The pending payout exceeds the current vault balance. "
+                    "The balance was not changed; reconcile this transaction manually.",
+                    icon=":material/error:",
+                )
+                return
+            if not any(
+                transaction.get("provider_reference") == pending["reference_id"]
+                for transaction in profile.get("transactions", [])
+            ):
+                amount = round(pending["amount"])
+                if is_collection:
+                    profile["locked"] = True
+                    profile["initial_deposit"] = amount
+                    profile["vault_balance"] = amount
+                    profile["next_payout_at"] = next_payout_datetime(profile).isoformat()
+                    description = "MTN MoMo sandbox deposit"
+                else:
+                    profile["vault_balance"] = max(
+                        0, round(profile["vault_balance"]) - amount
+                    )
+                    if profile["vault_balance"] == 0:
+                        profile["next_payout_at"] = None
+                    description = "MTN MoMo sandbox payout"
+                transaction = make_transaction(
+                    "Deposit" if is_collection else "Scheduled payout",
+                    amount,
+                    profile["vault_balance"],
+                    description,
+                )
+                transaction["provider_reference"] = pending["reference_id"]
+                profile.setdefault("transactions", []).append(transaction)
+            profile[pending_key] = None
+            if is_collection:
+                st.session_state.deposit_complete = True
+        elif status in {"FAILED", "REJECTED", "EXPIRED"}:
+            profile[pending_key] = None
+            st.session_state.mtn_flash = (
+                "error",
+                f"MTN MoMo reported {status.lower()}. No balance was changed.",
+            )
+        else:
+            pending["status"] = status
+            st.info(f"MTN MoMo reports {status.lower()}. Check again later.")
+        _save_mtn_profile(
+            profile,
+            auth_configured,
+            supabase_url,
+            supabase_service_key,
+            database_path,
+            user_key,
+        )
+        if status == "SUCCESSFUL":
+            st.session_state.mtn_flash = (
+                "success",
+                f"MTN MoMo {('deposit' if is_collection else 'payout')} confirmed.",
+            )
+        st.rerun()
+
+
+def render_mtn_momo_page(
+    profile: dict,
+    auth_configured: bool,
+    supabase_url: str,
+    supabase_service_key: str,
+    database_path,
+    user_key: str,
+    money,
+    mtn_settings: dict,
+) -> None:
+    _show_mtn_flash()
+    st.title("MTN MoMo sandbox", icon=":material/account_balance_wallet:")
+    st.warning(
+        "Sandbox only. Do not use this integration to handle real funds; "
+        "production payments need verified callbacks, reconciliation, and a production security review.",
+        icon=":material/science:",
+    )
+    client = MomoClient(mtn_settings)
+    collection_ready = client.is_configured("collection")
+    disbursement_ready = client.is_configured("disbursement")
+    st.write(
+        f"Collection credentials: **{'configured' if collection_ready else 'not configured'}** · "
+        f"Disbursement credentials: **{'configured' if disbursement_ready else 'not configured'}**"
+    )
+    if disbursement_ready:
+        st.caption(
+            "Automatic scheduled payouts are disabled while MTN disbursement is configured. "
+            "Initiate and verify sandbox payouts here."
+        )
+    if not collection_ready and not disbursement_ready:
+        st.info("Add the MTN MoMo sandbox keys to `.streamlit/secrets.toml` to enable either flow.")
+        return
+
+    st.subheader("Sandbox payout")
+    st.write(f"Available CampusFlow balance: **{money(profile['vault_balance'])}**")
+    if not disbursement_ready:
+        st.info("Configure MTN disbursement sandbox credentials to send a payout.")
+    elif profile["network"] != "MTN":
+        st.info("Select MTN as the registered mobile money network before sending a payout.")
+    elif profile["mtn_pending_transfer"]:
+        _render_mtn_status_action(
+            profile,
+            "transfer",
+            auth_configured,
+            supabase_url,
+            supabase_service_key,
+            database_path,
+            user_key,
+            mtn_settings,
+            money,
+        )
+    elif profile["vault_balance"] <= 0:
+        st.info("A positive balance is required before requesting a sandbox payout.")
+    else:
+        with st.form("mtn_sandbox_payout"):
+            amount = st.number_input(
+                "Payout amount (UGX)",
+                min_value=1,
+                max_value=round(profile["vault_balance"]),
+                value=min(round(profile["vault_balance"]), 10_000),
+                step=1_000,
+            )
+            confirmed = st.checkbox("I confirm this MTN MoMo sandbox payout.")
+            submitted = st.form_submit_button(
+                "Send sandbox payout",
+                type="primary",
+                disabled=not confirmed,
+            )
+        if submitted:
+            if profile["phone"] == "":
+                st.error("Add a registered phone number before requesting a payout.")
+                return
+            reference_id = str(uuid4())
+            profile["mtn_pending_transfer"] = {
+                "reference_id": reference_id,
+                "amount": round(amount),
+                "status": "PENDING",
+            }
+            _save_mtn_profile(
+                profile,
+                auth_configured,
+                supabase_url,
+                supabase_service_key,
+                database_path,
+                user_key,
+            )
+            try:
+                client.transfer(reference_id, round(amount), profile["phone"])
+            except MomoApiError as error:
+                st.error(str(error), icon=":material/error:")
+            else:
+                st.info("Payout request submitted. Check its status below.")
+                st.rerun()
+
+
+def render_page(page: str, profile: dict, auth_configured: bool, supabase_url: str, supabase_service_key: str, database_path, user_key: str, money, plan: dict, mtn_settings: dict) -> None:
     if page == "Welcome":
         render_welcome_page(auth_configured)
     elif page == "1. Sign up":
@@ -469,7 +759,18 @@ def render_page(page: str, profile: dict, auth_configured: bool, supabase_url: s
     elif page == "4. Payout schedule":
         render_schedule_page(profile, auth_configured, supabase_url, supabase_service_key, database_path, user_key)
     elif page == "5. Deposit money":
-        render_deposit_page(profile, auth_configured, supabase_url, supabase_service_key, database_path, user_key, money, plan)
+        render_deposit_page(profile, auth_configured, supabase_url, supabase_service_key, database_path, user_key, money, plan, mtn_settings)
+    elif page == "MTN MoMo sandbox":
+        render_mtn_momo_page(
+            profile,
+            auth_configured,
+            supabase_url,
+            supabase_service_key,
+            database_path,
+            user_key,
+            money,
+            mtn_settings,
+        )
     elif page == "Transactions":
         render_transactions_page(profile, money)
     elif page == "Emergency withdrawal":

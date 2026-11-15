@@ -13,6 +13,7 @@ from backend.domain import (
     payout_schedule_label,
     process_due_payouts,
 )
+from backend.mtn_momo import MomoClient
 from backend.storage import load_workspace, save_workspace
 from frontend.pages import render_page
 
@@ -42,6 +43,7 @@ def render_app() -> None:
     supabase_settings = st.secrets.get("supabase", {})
     supabase_url = supabase_settings.get("url", "").rstrip("/")
     supabase_service_key = supabase_settings.get("service_role_key", "")
+    mtn_settings = dict(st.secrets.get("mtn_momo", {}))
 
     if auth_configured and not st.user.is_logged_in:
         st.title("Welcome to CampusFlow", icon=":material/account_balance_wallet:")
@@ -72,7 +74,10 @@ def render_app() -> None:
     profile = st.session_state.profile
     old_balance = profile["vault_balance"]
     old_next_payout_at = profile["next_payout_at"]
-    due_transactions = process_due_payouts(profile)
+    mtn_disbursement_enabled = MomoClient(mtn_settings).is_configured("disbursement")
+    due_transactions = (
+        [] if mtn_disbursement_enabled else process_due_payouts(profile)
+    )
     if (
         due_transactions
         or profile_migrated
@@ -151,6 +156,7 @@ def render_app() -> None:
             "3. Calculate plan",
             "4. Payout schedule",
             "5. Deposit money",
+            "MTN MoMo sandbox",
             "Transactions",
             "Emergency withdrawal",
         ]
@@ -216,4 +222,4 @@ def render_app() -> None:
             st.warning(f"Complete {', '.join(missing_steps)} before continuing.", icon=":material/arrow_back:")
             st.stop()
 
-    render_page(page, profile, auth_configured, supabase_url, supabase_service_key, database_path, user_key(auth_configured), money, plan)
+    render_page(page, profile, auth_configured, supabase_url, supabase_service_key, database_path, user_key(auth_configured), money, plan, mtn_settings)

@@ -34,6 +34,8 @@ def default_profile(user_name: str = "") -> dict:
         "initial_deposit": 0,
         "transactions": [],
         "next_payout_at": None,
+        "mtn_pending_collection": None,
+        "mtn_pending_transfer": None,
     }
 
 

@@ -81,6 +81,12 @@ Authentication alone is not enough for real financial data. A production release
 
 This prototype uses simulated balances and payout approvals. It does not connect to Mobile Money, XENO, a bank, or a production database.
 
+### MTN MoMo sandbox
+
+The optional MTN integration supports both MoMo Collection (request a student deposit) and Disbursement (request a sandbox payout). Create sandbox API users and subscriptions for both products in the MTN MoMo developer portal, then add the six `mtn_momo` values shown in `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` or the Streamlit Cloud secrets. Credentials are only read server-side. The integration always targets MTN's sandbox environment and uses UGX; incomplete product credentials leave that flow disabled.
+
+After submitting a collection or payout, use **Check MTN ... status** to verify its result. CampusFlow updates its local balance only after MTN reports `SUCCESSFUL` with the expected UGX amount; requests are not sent automatically on scheduled payout times. When disbursement credentials are configured, simulated scheduled deductions are disabled so the local balance is not reduced twice. This sandbox integration has no payment callback/webhook and does not provide production-grade reconciliation or financial custody. Do not use it with live funds.
+
 ## Simulated allowance and transaction flow
 
 The calculator compares available funds with the selected expense baseline and target duration. Recording a deposit starts a simulated vault balance and adds a deposit transaction. When an authenticated workspace is opened, CampusFlow records any scheduled payouts that have become due since the last visit, deducting them from that balance. Payout processing does not run in the background while the app is closed.
